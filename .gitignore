@@ -27,7 +27,7 @@ ENV/
 *.iml
 
 # Data files
-data/
+LabelledPoints/
 
 # Logs
 *.log
