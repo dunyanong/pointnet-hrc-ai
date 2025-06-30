@@ -1,0 +1,73 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+*.env
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# PyCharm
+*.iml
+
+# Data files
+data/
+
+# Logs
+*.log
+logs/
+
+# Output files
+*.out
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.onnx
+
+# Model artifacts
+checkpoints/
+runs/
+experiments/
+wandb/
+
+# Python egg metadata
+*.egg-info/
+dist/
+build/
+
+# DVC cache (if using DVC)
+.dvc/
+
+# MacOS
+.DS_Store
+
+# Colab
+*.ipynb (if syncing intermediate notebooks you may want to exclude some)
+
+# TensorBoard
+events.out.tfevents.*
+
+# MyPy
+.mypy_cache/
+
+# Unit test / coverage
+.coverage
+coverage.xml
+htmlcov/
