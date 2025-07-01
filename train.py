@@ -1,12 +1,10 @@
 import h5py
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, Dataset
 
 from model.pointnet3d import PointNetSeg3D, feature_transform_regularizer
-# from h5_dataset import H5PointCloudDataset
 
 # Purpose: Set random seeds for reproducibility of results.
 torch.manual_seed(42)
@@ -17,35 +15,25 @@ if torch.cuda.is_available():
 BATCH_SIZE = 16
 NUM_POINTS = 1024
 
-
-class NpyPointCloudDataset(Dataset):
-    def __init__(self, npy_path, num_points=1024):
-        data = np.load(npy_path, allow_pickle=True)
-        if isinstance(data, np.ndarray) and data.dtype == object:
-            data = data.item()  
-        data = np.array(data)
-        self.points = data[:, :3]
-        self.labels = data[:, 3].astype(np.uint8)
-        self.labels[self.labels == 255] = 1
-        self.num_points = num_points
-        self.length = len(self.points) // self.num_points
+# H5PointCloudDataset: Loads point cloud data and labels from an HDF5 file.
+# Purpose: Custom Dataset for loading point clouds and their segmentation labels.
+class H5PointCloudDataset(Dataset):
+    def __init__(self, h5_path):
+        with h5py.File(h5_path, 'r') as f:
+            self.points = f['point'][:]  # shape: (N, num_points, 3)
+            self.labels = f['labels'][:]  # shape: (N, num_points)
 
     def __len__(self):
-        return self.length
+        return len(self.points)
 
     def __getitem__(self, idx):
-        start = idx * self.num_points
-        end = start + self.num_points
-        pts = self.points[start:end]
-        lbl = self.labels[start:end]
-        return torch.tensor(pts, dtype=torch.float32), torch.tensor(lbl, dtype=torch.long)
+        # Returns a tuple: (point cloud, labels) for a single sample
+        return torch.tensor(self.points[idx], dtype=torch.float32), torch.tensor(self.labels[idx], dtype=torch.long)
 
 # Purpose: Load the dataset and create a DataLoader for batching and shuffling.
-npy_path = '//home/internship/Documents/LabelledPoints_bin/centre_centre_lighting.npy'
-dataset = NpyPointCloudDataset(npy_path, num_points=NUM_POINTS)
+h5_path = '/home/internship/Documents/pointnet-hrc-vision/LabelledPoints/centre_centre_lighting.h5'
+dataset = H5PointCloudDataset(h5_path)
 dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-print("Label min:", dataset.labels.min(), "Label max:", dataset.labels.max())
 
 # Purpose: Initialize the PointNet segmentation model, optimizer, and loss function.
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -64,19 +52,21 @@ for epoch in range(EPOCHS):
     for data, target in dataloader:
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        output, feature_transform = model(data) 
+        output = model(data)  # (B, N, 2)
         output = output.permute(0, 2, 1)  # (B, 2, N)
         output = output.reshape(-1, output.shape[1])  # (B*N, 2)
         target = target.view(-1)  # (B*N,)
 
-        # Regularization loss for feature transform
-        reg_loss = feature_transform_regularizer(feature_transform)
+        # Regularization loss: Encourages transformation matrix to be close to orthogonal.
+        transform = model.input_transform(data.transpose(2, 1))
+        reg_loss = feature_transform_regularizer(transform)
         loss = criterion(output, target) + 0.001 * reg_loss
 
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
 
+        # Calculate accuracy
         preds = output.argmax(dim=1)
         correct += (preds == target).sum().item()
         total += target.numel()

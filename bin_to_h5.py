@@ -14,7 +14,7 @@ labels = data[:, 3].astype(np.uint8)  # shape (N,), values like 0 or 1
 
 # Save to HDF5
 with h5py.File(h5_file, 'w') as f:
-    f.create_dataset('data', data=points, compression='gzip')   # (N, 3)
+    f.create_dataset('point', data=points, compression='gzip')   # (N, 3)
     f.create_dataset('label', data=labels, compression='gzip')  # (N,)
 
 print(f"Saved to {h5_file}")
