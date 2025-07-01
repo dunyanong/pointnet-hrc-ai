@@ -6,7 +6,7 @@ import torch.nn.functional as F
 # Purpose: Makes the network invariant to geometric transformations (like rotation).
 class TNet3D(nn.Module):
     def __init__(self, k=3):
-        super(TNet, self).__init__()
+        super(TNet3D, self).__init__()
         self.k = k  # Input dimension (e.g., 3 for xyz coordinates)
         # 1D convolution layers to extract features from input points (No of input channels, No of output channels[number of filters/kernels], Kernel size)
         self.conv1 = nn.Conv1d(k, 64, 1)
