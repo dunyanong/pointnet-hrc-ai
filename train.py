@@ -4,23 +4,98 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
+import os 
+import glob
 from model.model import PointNetSegmentation, feature_transform_regularizer
 
 class PointCloudDataset(Dataset):
-    """Dataset class for point cloud data"""
-    def __init__(self, data_path, num_points=1024):
+    """Dataset class for point cloud data in .off format"""
+    def __init__(self, data_path, num_points=1024, split='train'):
         self.data_path = data_path
         self.num_points = num_points
+        self.split = split
         self.point_clouds = []
         self.labels = []
-        # TODO: Load your point cloud data and labels here
+        
+        # Load point cloud data from .off files
+        self.load_data()
+        
+    def load_data(self):
+        """Load point cloud data from ModelNet40 .off files"""
+        # categories = os.listdir(self.data_path)
+        # categories = [cat for cat in categories if os.path.isdir(os.path.join(self.data_path, cat))]
+
+        categories = ["laptop"]
+        
+        print(f"Binary classification for laptop detection")
+        
+        for category in categories:
+            category_path = os.path.join(self.data_path, category, self.split)
+            if not os.path.exists(category_path):
+                continue
+                
+            off_files = glob.glob(os.path.join(category_path, "*.off"))
+            
+            for off_file in off_files:
+                try:
+                    points = self.read_off_file(off_file)
+                    if points is not None and len(points) > 0:
+                        self.point_clouds.append(points)
+                        # Create binary segmentation labels
+                        point_labels = self.create_binary_labels(points)
+                        self.labels.append(point_labels)
+                except Exception as e:
+                    print(f"Error loading {off_file}: {e}")
+                    continue
+                    
+        print(f"Loaded {len(self.point_clouds)} point clouds for {self.split}")
+    
+    def create_binary_labels(self, points):
+        """Create binary labels for laptop segmentation"""
+        num_points = len(points)
+        
+        # Simple heuristic: assume center points are more likely to be laptop
+        center = np.mean(points, axis=0)
+        distances = np.linalg.norm(points - center, axis=1)
+        threshold = np.percentile(distances, 60)  # 60% of points as laptop
+        
+        labels = np.where(distances <= threshold, 1, 0).astype(np.int64)  # 1=laptop, 0=background
+        return labels
+    
+    def read_off_file(self, file_path):
+        """Read point cloud from .off file"""
+        try:
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+                
+            # Check if first line is 'OFF'
+            if lines[0].strip() != 'OFF':
+                return None
+                
+            # Parse header
+            header = lines[1].strip().split()
+            num_vertices = int(header[0])
+            num_faces = int(header[1])
+            
+            # Read vertices (points)
+            points = []
+            for i in range(2, 2 + num_vertices):
+                vertex = lines[i].strip().split()
+                if len(vertex) >= 3:
+                    points.append([float(vertex[0]), float(vertex[1]), float(vertex[2])])
+                    
+            return np.array(points, dtype=np.float32)
+            
+        except Exception as e:
+            print(f"Error reading {file_path}: {e}")
+            return None
         
     def __len__(self):
         return len(self.point_clouds)
     
     def __getitem__(self, idx):
-        point_cloud = self.point_clouds[idx]
-        label = self.labels[idx]
+        point_cloud = self.point_clouds[idx].copy()
+        label = self.labels[idx].copy()
         
         # Random sampling if more points than needed
         if point_cloud.shape[0] > self.num_points:
@@ -31,41 +106,59 @@ class PointCloudDataset(Dataset):
         # Padding if fewer points than needed
         elif point_cloud.shape[0] < self.num_points:
             padding = self.num_points - point_cloud.shape[0]
-            point_cloud = np.concatenate([point_cloud, point_cloud[:padding]], axis=0)
-            label = np.concatenate([label, label[:padding]], axis=0)
+            indices = np.random.choice(point_cloud.shape[0], padding, replace=True)
+            point_cloud = np.concatenate([point_cloud, point_cloud[indices]], axis=0)
+            label = np.concatenate([label, label[indices]], axis=0)
+        
+        # Normalize point cloud to unit sphere
+        point_cloud = self.normalize_point_cloud(point_cloud)
         
         return torch.FloatTensor(point_cloud).transpose(1, 0), torch.LongTensor(label)
+    
+    def normalize_point_cloud(self, points):
+        """Normalize point cloud to unit sphere"""
+        # Center the point cloud
+        centroid = np.mean(points, axis=0)
+        points = points - centroid
+        
+        # Scale to unit sphere
+        max_dist = np.max(np.sqrt(np.sum(points**2, axis=1)))
+        if max_dist > 0:
+            points = points / max_dist
+            
+        return points
 
 def train_model():
     # Hyperparameters
-    batch_size = 32
-    num_epochs = 100
+    batch_size = 64
+    num_epochs = 500
     learning_rate = 0.001
     num_points = 1024
-    num_classes = 2  # robot/not-robot
     
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # Dataset paths
+    data_path = 'Dataset/ModelNet40'
+    
+    # Create datasets
+    train_dataset = PointCloudDataset(data_path, num_points=num_points, split='train')
+    
+    # Binary classification: 2 classes only
+    num_classes = 2
+    print(f"Binary classification with {num_classes} classes")
+    
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    
     # Model
     model = PointNetSegmentation(num_classes=num_classes).to(device)
     
-    # Loss and optimizer
-    loss_type = nn.CrossEntropyLoss() 
+    # Binary classification loss
+    loss_type = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
-    
-    # TODO: Replace with your actual dataset
-    # train_dataset = PointCloudDataset('path/to/train/data', num_points=num_points)
-    # val_dataset = PointCloudDataset('path/to/val/data', num_points=num_points)
-    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    # val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    
-    # Dummy data for testing
-    train_loader = create_dummy_dataloader(batch_size, num_points, num_classes)
-    val_loader = create_dummy_dataloader(batch_size, num_points, num_classes)
     
     # Training loop
     for epoch in range(num_epochs):
@@ -85,7 +178,7 @@ def train_model():
             # Reshape target to match output
             target = target.view(-1)
             
-            # Main loss
+            # Binary classification loss
             loss = loss_type(output, target)
             
             # Feature transform regularization
@@ -106,35 +199,11 @@ def train_model():
                 print(f'Epoch: {epoch+1}/{num_epochs}, Batch: {batch_idx}, '
                       f'Loss: {total_loss.item():.4f}')
         
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        val_correct = 0
-        val_total = 0
-        
-        #
-        with torch.no_grad():
-            for data, target in val_loader:
-                data, target = data.to(device), target.to(device)
-                
-                output, feature_transform = model(data)
-                target = target.view(-1)
-                
-                loss = loss_type(output, target)
-                reg_loss = feature_transform_regularizer(feature_transform)
-                total_loss = loss + 0.001 * reg_loss
-                
-                val_loss += total_loss.item()
-                _, predicted = torch.max(output.data, 1)
-                val_total += target.size(0)
-                val_correct += (predicted == target).sum().item()
-        
         # Print epoch results
         train_acc = 100. * train_correct / train_total
-        val_acc = 100. * val_correct / val_total
         print(f'Epoch {epoch+1}/{num_epochs}:')
-        print(f'Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.2f}%')
-        print(f'Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.2f}%')
+        print(f'Train Loss: {train_loss/len(train_loader):.4f}')
+        print(f'Train Accuracy: {train_acc:.2f}%')
         print('-' * 60)
         
         # Step scheduler
@@ -147,31 +216,11 @@ def train_model():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_acc': train_acc,
-                'val_acc': val_acc,
-            }, f'checkpoint_epoch_{epoch+1}.pth')
+            }, f'files/checkpoint_epoch_{epoch+1}.pt')
     
     # Save final model
-    torch.save(model.state_dict(), 'pointnet_robot_removal.pth')
+    torch.save(model.state_dict(), 'pointnet_robot_removal.pt')
     print("Training completed!")
-
-def create_dummy_dataloader(batch_size, num_points, num_classes):
-    """Create dummy data for testing"""
-    class DummyDataset(Dataset):
-        def __init__(self, size=100):
-            self.size = size
-            
-        def __len__(self):
-            return self.size
-        
-        def __getitem__(self, idx):
-            # Random point cloud (num_points x 3)
-            points = torch.randn(3, num_points)
-            # Random labels for each point
-            labels = torch.randint(0, num_classes, (num_points,))
-            return points, labels
-    
-    dataset = DummyDataset()
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 if __name__ == "__main__":
     train_model()
