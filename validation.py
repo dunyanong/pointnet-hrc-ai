@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 from model.model import PointNetSegmentation, feature_transform_regularizer
 from train import PointCloudDataset
+from extract_files import read_off_file, normalize_point_cloud, preprocess_single_point_cloud
 
 class ModelValidator:
     """Class for validating the PointNet model"""
@@ -164,22 +165,13 @@ class ModelValidator:
             return None
             
         # Load and preprocess the point cloud
-        points = self.dataset.read_off_file(point_cloud_path)
+        points = read_off_file(point_cloud_path)
         if points is None:
             print(f"Failed to load point cloud from {point_cloud_path}")
             return None
             
-        # Preprocess
-        if points.shape[0] > self.num_points:
-            choice = np.random.choice(points.shape[0], self.num_points, replace=False)
-            points = points[choice, :]
-        elif points.shape[0] < self.num_points:
-            padding = self.num_points - points.shape[0]
-            indices = np.random.choice(points.shape[0], padding, replace=True)
-            points = np.concatenate([points, points[indices]], axis=0)
-            
-        # Normalize
-        points = self.dataset.normalize_point_cloud(points)
+        # Preprocess using utility function
+        points = preprocess_single_point_cloud(points, self.num_points, normalize=True)
         
         # Convert to tensor
         point_tensor = torch.FloatTensor(points).transpose(1, 0).unsqueeze(0).to(self.device)
@@ -214,7 +206,7 @@ class ModelValidator:
 def main():
     """Main validation function"""
     # Configuration
-    model_path = 'pointnet_robot_removal.pt'
+    model_path = 'laptop_classifier.pt'
     data_path = 'Dataset/ModelNet40'
     
     # Create validator
