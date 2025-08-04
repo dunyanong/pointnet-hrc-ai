@@ -1,215 +1,276 @@
+#include <iostream>
+#include <memory>
+#include <chrono>
+#include <thread>
 #include <sl/Camera.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/common/transforms.h>
-#include <torch/torch.h>
-#include <torch/script.h>
 #include <opencv2/opencv.hpp>
-#include <iostream>
-#include <vector>
-#include <memory>
+#include "pointnet_inference.h"
 
-class PointNetInference {
-private:
-    sl::Camera zed;
-    torch::jit::script::Module model;
-    pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-    
+class ZEDPointNetApp {
 public:
-    PointNetInference(const std::string& model_path) {
+    ZEDPointNetApp() : 
+        viewer_(new pcl::visualization::PCLVisualizer("PointNet Laptop Segmentation")),
+        inference_engine_(nullptr),
+        running_(false) {
+        
+        // Initialize viewer
+        viewer_->setBackgroundColor(0, 0, 0);
+        viewer_->addCoordinateSystem(1.0);
+        viewer_->initCameraParameters();
+    }
+    
+    ~ZEDPointNetApp() {
+        cleanup();
+    }
+    
+    bool initialize() {
         // Initialize ZED camera
+        if (!initializeZED()) {
+            std::cerr << "Failed to initialize ZED camera" << std::endl;
+            return false;
+        }
+        
+        // Initialize PointNet model
+        if (!initializePointNet()) {
+            std::cerr << "Failed to initialize PointNet model" << std::endl;
+            return false;
+        }
+        
+        std::cout << "Initialization completed successfully!" << std::endl;
+        return true;
+    }
+    
+    void run() {
+        if (!zed_.isOpened()) {
+            std::cerr << "ZED camera not opened!" << std::endl;
+            return;
+        }
+        
+        running_ = true;
+        
+        // Main processing loop
+        sl::Mat zed_cloud;
+        sl::Mat zed_image;
+        
+        while (running_ && !viewer_->wasStopped()) {
+            // Capture from ZED
+            sl::ERROR_CODE err = zed_.grab();
+            if (err == sl::ERROR_CODE::SUCCESS) {
+                // Get point cloud and image
+                zed_.retrieveMeasure(zed_cloud, sl::MEASURE::XYZRGBA);
+                zed_.retrieveImage(zed_image, sl::VIEW::LEFT);
+                
+                // Convert to PCL format
+                auto pcl_cloud = convertZEDtoPCL(zed_cloud);
+                
+                if (pcl_cloud && !pcl_cloud->empty()) {
+                    // Preprocess point cloud
+                    auto filtered_cloud = preprocessPointCloud(pcl_cloud);
+                    
+                    // Perform PointNet inference
+                    std::vector<int> labels;
+                    std::vector<std::vector<float>> probabilities;
+                    
+                    if (inference_engine_->segmentPointCloud(filtered_cloud, labels, probabilities)) {
+                        // Visualize results
+                        visualizeSegmentation(filtered_cloud, labels, probabilities);
+                        
+                        // Display ZED image
+                        displayZEDImage(zed_image);
+                    }
+                }
+            }
+            
+            // Update viewer
+            viewer_->spinOnce(100);
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+    }
+    
+    void stop() {
+        running_ = false;
+    }
+
+private:
+    bool initializeZED() {
         sl::InitParameters init_params;
         init_params.camera_resolution = sl::RESOLUTION::HD720;
         init_params.depth_mode = sl::DEPTH_MODE::ULTRA;
         init_params.coordinate_units = sl::UNIT::METER;
+        init_params.coordinate_system = sl::COORDINATE_SYSTEM::RIGHT_HANDED_Y_UP;
         
-        sl::ERROR_CODE zed_error = zed.open(init_params);
-        if (zed_error != sl::ERROR_CODE::SUCCESS) {
-            throw std::runtime_error("Failed to open ZED camera: " + std::to_string((int)zed_error));
+        sl::ERROR_CODE err = zed_.open(init_params);
+        if (err != sl::ERROR_CODE::SUCCESS) {
+            std::cerr << "ZED initialization failed: " << err << std::endl;
+            return false;
         }
         
-        // Load TorchScript model
-        try {
-            model = torch::jit::load(model_path);
-            model.eval();
-            std::cout << "Model loaded successfully" << std::endl;
-        } catch (const std::exception& e) {
-            throw std::runtime_error("Failed to load model: " + std::string(e.what()));
+        std::cout << "ZED camera initialized successfully" << std::endl;
+        return true;
+    }
+    
+    bool initializePointNet() {
+        std::string model_path = "DeployModel/laptop_classifier_traced.pt";
+        inference_engine_ = std::make_unique<PointNetInference>(model_path, "cuda");
+        
+        if (!inference_engine_->initialize()) {
+            std::cerr << "Failed to initialize PointNet inference engine" << std::endl;
+            return false;
         }
         
-        // Configure voxel grid filter
-        voxel_filter.setLeafSize(0.01f, 0.01f, 0.01f);
+        std::cout << "PointNet model loaded successfully" << std::endl;
+        return true;
     }
     
-    ~PointNetInference() {
-        zed.close();
-    }
-    
-    pcl::PointCloud<pcl::PointXYZ>::Ptr capturePointCloud() {
-        sl::Mat point_cloud_mat;
-        sl::RuntimeParameters runtime_params;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr convertZEDtoPCL(const sl::Mat& zed_cloud) {
+        auto pcl_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         
-        // Grab frame
-        if (zed.grab(runtime_params) == sl::ERROR_CODE::SUCCESS) {
-            zed.retrieveMeasure(point_cloud_mat, sl::MEASURE::XYZRGBA);
+        int width = zed_cloud.getWidth();
+        int height = zed_cloud.getHeight();
+        
+        pcl_cloud->width = width;
+        pcl_cloud->height = height;
+        pcl_cloud->is_dense = false;
+        pcl_cloud->points.resize(width * height);
+        
+        float* zed_ptr = zed_cloud.getPtr<float>();
+        
+        for (int i = 0; i < width * height; ++i) {
+            float x = zed_ptr[i * 4 + 0];
+            float y = zed_ptr[i * 4 + 1];
+            float z = zed_ptr[i * 4 + 2];
             
-            // Convert ZED point cloud to PCL format
-            auto pcl_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-            
-            int width = point_cloud_mat.getWidth();
-            int height = point_cloud_mat.getHeight();
-            
-            pcl_cloud->width = width;
-            pcl_cloud->height = height;
-            pcl_cloud->is_dense = false;
-            pcl_cloud->points.resize(width * height);
-            
-            sl::float4* point_cloud_ptr = point_cloud_mat.getPtr<sl::float4>();
-            
-            for (int i = 0; i < width * height; ++i) {
-                sl::float4 point = point_cloud_ptr[i];
-                
-                if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
-                    pcl_cloud->points[i].x = point.x;
-                    pcl_cloud->points[i].y = point.y;
-                    pcl_cloud->points[i].z = point.z;
-                } else {
-                    pcl_cloud->points[i].x = std::numeric_limits<float>::quiet_NaN();
-                    pcl_cloud->points[i].y = std::numeric_limits<float>::quiet_NaN();
-                    pcl_cloud->points[i].z = std::numeric_limits<float>::quiet_NaN();
-                }
+            if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
+                pcl_cloud->points[i].x = x;
+                pcl_cloud->points[i].y = y;
+                pcl_cloud->points[i].z = z;
+            } else {
+                pcl_cloud->points[i].x = pcl_cloud->points[i].y = pcl_cloud->points[i].z = NAN;
             }
-            
-            return pcl_cloud;
         }
-        
-        return nullptr;
-    }
-    
-    pcl::PointCloud<pcl::PointXYZ>::Ptr preprocessPointCloud(
-        pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud) {
-        
-        auto filtered_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         
         // Remove NaN points
         std::vector<int> indices;
-        pcl::removeNaNFromPointCloud(*input_cloud, *filtered_cloud, indices);
+        pcl::removeNaNFromPointCloud(*pcl_cloud, *pcl_cloud, indices);
         
-        // Apply voxel grid filter for downsampling
+        return pcl_cloud;
+    }
+    
+    pcl::PointCloud<pcl::PointXYZ>::Ptr preprocessPointCloud(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+        
+        // Statistical outlier removal
+        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+        sor.setInputCloud(cloud);
+        sor.setMeanK(50);
+        sor.setStddevMulThresh(1.0);
+        
+        auto filtered_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        sor.filter(*filtered_cloud);
+        
+        // Voxel grid downsampling
+        pcl::VoxelGrid<pcl::PointXYZ> vg;
+        vg.setInputCloud(filtered_cloud);
+        vg.setLeafSize(0.01f, 0.01f, 0.01f); // 1cm voxel size
+        
         auto downsampled_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        voxel_filter.setInputCloud(filtered_cloud);
-        voxel_filter.filter(*downsampled_cloud);
+        vg.filter(*downsampled_cloud);
         
         return downsampled_cloud;
     }
     
-    torch::Tensor pointCloudToTensor(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud) {
-        std::vector<float> points_data;
-        points_data.reserve(cloud->size() * 3);
+    void visualizeSegmentation(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+                             const std::vector<int>& labels,
+                             const std::vector<std::vector<float>>& probabilities) {
         
-        for (const auto& point : cloud->points) {
-            points_data.push_back(point.x);
-            points_data.push_back(point.y);
-            points_data.push_back(point.z);
+        // Create colored point cloud for visualization
+        auto colored_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+        colored_cloud->width = cloud->width;
+        colored_cloud->height = cloud->height;
+        colored_cloud->is_dense = cloud->is_dense;
+        colored_cloud->points.resize(cloud->points.size());
+        
+        for (size_t i = 0; i < cloud->points.size() && i < labels.size(); ++i) {
+            colored_cloud->points[i].x = cloud->points[i].x;
+            colored_cloud->points[i].y = cloud->points[i].y;
+            colored_cloud->points[i].z = cloud->points[i].z;
+            
+            // Color based on segmentation result
+            if (labels[i] == 1) { // Laptop
+                // Red for laptop points
+                colored_cloud->points[i].r = 255;
+                colored_cloud->points[i].g = 0;
+                colored_cloud->points[i].b = 0;
+            } else { // Background
+                // Blue for background points
+                colored_cloud->points[i].r = 0;
+                colored_cloud->points[i].g = 0;
+                colored_cloud->points[i].b = 255;
+            }
         }
         
-        // Create tensor with shape [1, N, 3] where N is number of points
-        auto options = torch::TensorOptions().dtype(torch::kFloat32);
-        torch::Tensor tensor = torch::from_blob(
-            points_data.data(), 
-            {1, static_cast<long>(cloud->size()), 3}, 
-            options
-        ).clone();
+        // Update visualization
+        if (!viewer_->updatePointCloud(colored_cloud, "segmentation")) {
+            viewer_->addPointCloud(colored_cloud, "segmentation");
+        }
         
-        return tensor;
+        // Add text with statistics
+        int laptop_points = std::count(labels.begin(), labels.end(), 1);
+        int total_points = labels.size();
+        float laptop_percentage = 100.0f * laptop_points / total_points;
+        
+        std::string text = "Laptop: " + std::to_string(laptop_points) + "/" + 
+                          std::to_string(total_points) + " (" + 
+                          std::to_string(laptop_percentage) + "%)";
+        
+        viewer_->removeText3D("stats");
+        viewer_->addText(text, 10, 10, 16, 1.0, 1.0, 1.0, "stats");
     }
     
-    std::string runInference(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud) {
-        if (cloud->empty()) {
-            return "Empty point cloud";
-        }
+    void displayZEDImage(const sl::Mat& zed_image) {
+        cv::Mat cv_image(zed_image.getHeight(), zed_image.getWidth(), CV_8UC4, zed_image.getPtr<sl::uchar1>());
+        cv::Mat display_image;
+        cv::cvtColor(cv_image, display_image, cv::COLOR_BGRA2BGR);
         
-        // Convert point cloud to tensor
-        torch::Tensor input_tensor = pointCloudToTensor(cloud);
-        
-        // Prepare input for model
-        std::vector<torch::jit::IValue> inputs;
-        inputs.push_back(input_tensor);
-        
-        // Run inference
-        try {
-            torch::NoGradGuard no_grad;
-            at::Tensor output = model.forward(inputs).toTensor();
-            
-            // Apply softmax to get probabilities
-            auto probabilities = torch::softmax(output, 1);
-            
-            // Get predicted class
-            auto max_result = torch::max(probabilities, 1);
-            int predicted_class = std::get<1>(max_result).item<int>();
-            float confidence = std::get<0>(max_result).item<float>();
-            
-            // Map class index to label (adjust based on your model)
-            std::vector<std::string> class_labels = {"background", "laptop", "other_object"};
-            
-            if (predicted_class < class_labels.size()) {
-                return class_labels[predicted_class] + " (confidence: " + 
-                       std::to_string(confidence) + ")";
-            } else {
-                return "unknown_class";
-            }
-            
-        } catch (const std::exception& e) {
-            return "Inference error: " + std::string(e.what());
-        }
+        cv::imshow("ZED Camera", display_image);
+        cv::waitKey(1);
     }
     
-    void run() {
-        std::cout << "Starting point cloud capture and inference..." << std::endl;
-        
-        while (true) {
-            // Capture point cloud
-            auto raw_cloud = capturePointCloud();
-            if (!raw_cloud) {
-                std::cout << "Failed to capture point cloud" << std::endl;
-                continue;
-            }
-            
-            // Preprocess point cloud
-            auto processed_cloud = preprocessPointCloud(raw_cloud);
-            
-            std::cout << "Captured " << processed_cloud->size() << " points" << std::endl;
-            
-            // Run inference
-            std::string result = runInference(processed_cloud);
-            std::cout << "Classification result: " << result << std::endl;
-            
-            // Check for exit condition
-            char key = cv::waitKey(1);
-            if (key == 'q' || key == 27) { // 'q' or ESC
-                break;
-            }
-            
-            // Small delay
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    void cleanup() {
+        if (zed_.isOpened()) {
+            zed_.close();
         }
+        cv::destroyAllWindows();
     }
+    
+    sl::Camera zed_;
+    std::shared_ptr<pcl::visualization::PCLVisualizer> viewer_;
+    std::unique_ptr<PointNetInference> inference_engine_;
+    bool running_;
 };
 
-int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <path_to_model.pt>" << std::endl;
+int main() {
+    std::cout << "PointNet-HRC Vision System" << std::endl;
+    std::cout << "===========================" << std::endl;
+    
+    ZEDPointNetApp app;
+    
+    if (!app.initialize()) {
+        std::cerr << "Failed to initialize application" << std::endl;
         return -1;
     }
     
-    try {
-        PointNetInference inference(argv[1]);
-        inference.run();
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return -1;
-    }
+    std::cout << "Starting main loop..." << std::endl;
+    std::cout << "Press 'q' in the viewer window to quit" << std::endl;
     
+    app.run();
+    
+    std::cout << "Application finished" << std::endl;
     return 0;
 }

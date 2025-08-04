@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 from model.model import PointNetSegmentation, feature_transform_regularizer
 from train import PointCloudDataset
-from extract_files import read_off_file, normalize_point_cloud, preprocess_single_point_cloud
+from src.Utils.extract_files import read_off_file, normalize_point_cloud, preprocess_single_point_cloud
 
 class ModelValidator:
     """Class for validating the PointNet model"""
@@ -206,7 +206,7 @@ class ModelValidator:
 def main():
     """Main validation function"""
     # Configuration
-    model_path = 'laptop_classifier.pt'
+    model_path = 'DeployModel/laptop_classifier.pt'
     data_path = 'Dataset/ModelNet40'
     
     # Create validator
