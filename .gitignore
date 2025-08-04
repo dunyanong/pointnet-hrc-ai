@@ -72,5 +72,5 @@ events.out.tfevents.*
 coverage.xml
 htmlcov/
 
-files/
+Checkpoints/
 Dataset/

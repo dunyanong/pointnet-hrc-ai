@@ -5,9 +5,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
 import os 
+import sys
 import glob
+
+# Add the src directory to Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 from model.model import PointNetSegmentation, feature_transform_regularizer
-from extract_files import (
+from utils.extract_files import (
     load_point_cloud_data, 
     normalize_point_cloud, 
     resample_point_cloud,
@@ -152,7 +157,7 @@ def train_model():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_acc': train_acc,
                 'best_acc': best_acc,
-            }, 'files/best_model.pt')
+            }, 'Checkpoints/best_model.pt')
         
         # Save model checkpoint
         if (epoch + 1) % 20 == 0:
@@ -162,10 +167,10 @@ def train_model():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_acc': train_acc,
                 'best_acc': best_acc,
-            }, f'files/checkpoint_epoch_{epoch+1}.pt')
+            }, f'Checkpoints/checkpoint_epoch_{epoch+1}.pt')
     
     # Save final model
-    torch.save(model.state_dict(), 'laptop_classifier.pt')
+    torch.save(model.state_dict(), 'DeployModel/laptop_classifier.pt')
     print(f"Training completed! Best accuracy: {best_acc:.2f}%")
 
 if __name__ == "__main__":
